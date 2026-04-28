@@ -1,0 +1,190 @@
+:root {
+  --bg: #1e1e1e;
+  --bg-sidebar: #252526;
+  --bg-hover: #2a2d2e;
+  --bg-active: #37373d;
+  --border: #3c3c3c;
+  --text: #cccccc;
+  --text-dim: #969696;
+  --text-bright: #ffffff;
+  --accent: #007acc;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  height: 100vh;
+}
+
+.sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-header {
+  padding: 14px 16px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-header .title {
+  color: var(--text-bright);
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.tree {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+  flex: 1;
+}
+
+.tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree li { user-select: none; }
+
+.tree .folder > .label,
+.tree .file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 0;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree .folder > .label { font-weight: 500; }
+
+.tree .folder > .label:hover,
+.tree .file:hover {
+  background: var(--bg-hover);
+}
+
+.tree .file.active {
+  background: var(--bg-active);
+  color: var(--text-bright);
+}
+
+.tree .indent { display: inline-block; width: 14px; }
+.tree .chevron { display: inline-block; width: 10px; color: var(--text-dim); }
+.tree .icon { display: inline-block; width: 16px; text-align: center; font-size: 11px; }
+.tree .folder.collapsed > ul { display: none; }
+.tree .folder.collapsed > .label .chevron::before { content: "▸"; }
+.tree .folder:not(.collapsed) > .label .chevron::before { content: "▾"; }
+.tree .file .chevron::before { content: ""; }
+
+.content {
+  overflow: auto;
+  background: var(--bg);
+  position: relative;
+}
+
+.tabbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border);
+  padding: 0 12px;
+  height: 36px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.tabbar .path {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.tabbar .meta { color: var(--text-dim); margin-left: 12px; }
+
+.code-pane { display: none; }
+.code-pane.active { display: block; }
+
+.code-pane pre.shiki {
+  margin: 0 !important;
+  padding: 16px 0 24px 0 !important;
+  font-family: var(--font-mono) !important;
+  font-size: 13px !important;
+  line-height: 1.55 !important;
+  overflow: visible !important;
+}
+
+.code-pane pre.shiki code {
+  counter-reset: line;
+  display: block;
+}
+
+.code-pane pre.shiki .line {
+  display: inline-block;
+  width: 100%;
+  padding: 0 16px 0 0;
+}
+
+.code-pane pre.shiki .line::before {
+  counter-increment: line;
+  content: counter(line);
+  display: inline-block;
+  width: 48px;
+  padding-right: 16px;
+  margin-right: 8px;
+  text-align: right;
+  color: #858585;
+  user-select: none;
+  border-right: 1px solid var(--border);
+}
+
+.footer-note {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .sidebar { max-height: 240px; border-right: none; border-bottom: 1px solid var(--border); }
+  .code-pane pre.shiki .line::before { width: 36px; padding-right: 10px; }
+}
