@@ -1,6 +1,6 @@
-// build.mjs — Statische Survey-Seite bauen
+// build.mjs — Statische Survey-Seite bauen mit Diff-Hervorhebung
 // Liest Umfrage/Szenario A/* und Umfrage/Szenario B/*, rendert mit Shiki + AL-Grammar,
-// gibt eine HTML-Seite pro Framework × Szenario nach docs/<slug>/<output>/ aus.
+// markiert hinzugefügte/entfernte Zeilen anhand der zugehörigen Git-Patches.
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -12,17 +12,18 @@ import { createHighlighter } from 'shiki';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const UMFRAGE_DIR = path.join(ROOT, 'Umfrage');
+const OUTPUTS_DIR = path.join(ROOT, 'framework-tests', 'outputs');
 const OUT_DIR = path.join(__dirname, 'docs');
 const ASSETS_SRC = path.join(__dirname, 'assets');
 
 const SCENARIOS = [
-  { label: 'Szenario A', dir: 'Szenario A', slug: 'szenario-a' },
-  { label: 'Szenario B', dir: 'Szenario B', slug: 'szenario-b' },
+  { label: 'Szenario A', dir: 'Szenario A', slug: 'szenario-a', outputsSub: 'a-hard' },
+  { label: 'Szenario B', dir: 'Szenario B', slug: 'szenario-b', outputsSub: 'b-hard' },
 ];
 
 const FRAMEWORKS = ['claude', 'codex', 'copilot', 'cursor', 'gemini'];
 
-// ---------- Hilfsfunktionen ----------
+// ---------- Mapping + Grammar ----------
 
 async function loadMapping() {
   const raw = await fs.readFile(path.join(__dirname, 'mapping.json'), 'utf8');
@@ -41,7 +42,7 @@ async function loadAlGrammar() {
   if (candidates.length === 0) {
     throw new Error('AL-Grammar nicht gefunden. Bitte AL-Extension in VS Code installieren.');
   }
-  candidates.sort().reverse(); // neueste Version
+  candidates.sort().reverse();
   const grammarPath = candidates[0];
   const xml = await fs.readFile(grammarPath, 'utf8');
   const parsed = plist.parse(xml);
@@ -67,8 +68,97 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+// ---------- Unified-Diff-Parser ----------
+
+// Liefert Map<relPath, { isNew, isDeleted, addedLines:Set<int>, deletionsByNewLine:Map<int, string[]>, insertions, deletions }>
+function parseUnifiedDiff(patch) {
+  const result = new Map();
+  const lines = patch.split('\n');
+  let cur = null;
+  let hunkNew = 0;
+  let inHunk = false;
+
+  const commit = () => {
+    if (cur && cur.path) {
+      result.set(cur.path, {
+        isNew: cur.isNew,
+        isDeleted: cur.isDeleted,
+        addedLines: cur.addedLines,
+        deletionsByNewLine: cur.deletionsByNewLine,
+        insertions: cur.insertions,
+        deletions: cur.deletions,
+      });
+    }
+  };
+
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      commit();
+      cur = {
+        path: null,
+        isNew: false,
+        isDeleted: false,
+        addedLines: new Set(),
+        deletionsByNewLine: new Map(),
+        insertions: 0,
+        deletions: 0,
+      };
+      inHunk = false;
+      continue;
+    }
+    if (!cur) continue;
+
+    if (line.startsWith('new file mode')) cur.isNew = true;
+    else if (line.startsWith('deleted file mode')) cur.isDeleted = true;
+    else if (line.startsWith('+++ ')) {
+      const p = line.slice(4).trim();
+      cur.path = p === '/dev/null' ? null : (p.startsWith('b/') ? p.slice(2) : p);
+    } else if (line.startsWith('--- ')) {
+      // ignore, path bereits über +++ ermittelt
+    } else if (line.startsWith('@@')) {
+      const m = line.match(/@@\s-\d+(?:,\d+)?\s\+(\d+)(?:,\d+)?\s@@/);
+      hunkNew = m ? parseInt(m[1], 10) : 1;
+      inHunk = true;
+    } else if (inHunk) {
+      if (line.startsWith('+') && !line.startsWith('+++')) {
+        cur.addedLines.add(hunkNew);
+        cur.insertions++;
+        hunkNew++;
+      } else if (line.startsWith('-') && !line.startsWith('---')) {
+        const key = hunkNew;
+        if (!cur.deletionsByNewLine.has(key)) cur.deletionsByNewLine.set(key, []);
+        cur.deletionsByNewLine.get(key).push(line.slice(1));
+        cur.deletions++;
+      } else if (line.startsWith(' ')) {
+        hunkNew++;
+      }
+      // '\ No newline at end of file' und Leerzeilen ignorieren
+    }
+  }
+  commit();
+  return result;
+}
+
+async function loadDiffForOutput(scenarioSub, framework) {
+  const dir = path.join(OUTPUTS_DIR, framework, scenarioSub);
+  const candidates = ['diff.uncommitted.patch', 'diff.patch'];
+  let patch = '';
+  for (const name of candidates) {
+    try {
+      const buf = await fs.readFile(path.join(dir, name), 'utf8');
+      if (buf.trim().length > 0) {
+        patch += (patch ? '\n' : '') + buf;
+      }
+    } catch {
+      // existiert nicht, ignorieren
+    }
+  }
+  return patch ? parseUnifiedDiff(patch) : new Map();
+}
+
+// ---------- Datei-Sammlung & Baum ----------
+
 async function collectFiles(rootDir) {
-  // Liefert eine flache Liste {relPath, absPath} für alle Dateien unterhalb rootDir
   const entries = await fg('**/*', {
     cwd: rootDir,
     onlyFiles: true,
@@ -76,19 +166,13 @@ async function collectFiles(rootDir) {
     followSymbolicLinks: false,
   });
   entries.sort((a, b) => {
-    // Ordner-Tiefe zuerst nach Verzeichnis, dann alphabetisch
     const da = a.split('/').length;
     const db = b.split('/').length;
     if (da !== db) return da - db;
     return a.localeCompare(b, 'de');
   });
-  return entries.map((rel) => ({
-    relPath: rel,
-    absPath: path.join(rootDir, rel),
-  }));
+  return entries.map((rel) => ({ relPath: rel, absPath: path.join(rootDir, rel) }));
 }
-
-// ---------- Baum aus flacher Liste ----------
 
 function buildTree(files) {
   const root = { name: '', type: 'folder', children: new Map() };
@@ -111,19 +195,22 @@ function buildTree(files) {
   return root;
 }
 
-function renderTree(node, fileIdMap, depth = 0) {
+function renderTree(node, fileIdMap, fileStats, depth = 0) {
   if (node.type === 'file') {
     const id = fileIdMap.get(node.file.relPath);
+    const stat = fileStats.get(node.file.relPath);
     const indent = '<span class="indent"></span>'.repeat(depth);
-    return `<li><div class="file" data-target="${id}">${indent}<span class="chevron"></span><span class="icon">◧</span><span>${escapeHtml(node.name)}</span></div></li>`;
+    const statBadge = stat
+      ? `<span class="stat"><span class="stat-add">+${stat.insertions}</span><span class="stat-del">−${stat.deletions}</span></span>`
+      : '';
+    return `<li><div class="file" data-target="${id}">${indent}<span class="chevron"></span><span class="icon">◧</span><span class="fname">${escapeHtml(node.name)}</span>${statBadge}</div></li>`;
   }
-  // folder
   const children = [...node.children.values()]
     .sort((a, b) => {
       if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
       return a.name.localeCompare(b.name, 'de');
     })
-    .map((c) => renderTree(c, fileIdMap, depth + 1))
+    .map((c) => renderTree(c, fileIdMap, fileStats, depth + 1))
     .join('');
   if (depth === 0) {
     return `<ul class="tree">${children}</ul>`;
@@ -132,9 +219,92 @@ function renderTree(node, fileIdMap, depth = 0) {
   return `<li class="folder"><div class="label">${indent}<span class="chevron"></span><span class="icon">▦</span><span>${escapeHtml(node.name)}</span></div><ul>${children}</ul></li>`;
 }
 
+// ---------- Shiki-Rendering ----------
+
+function tokenizeLines(highlighter, code, lang) {
+  try {
+    const { tokens } = highlighter.codeToTokens(code, { lang, theme: 'dark-plus' });
+    return tokens;
+  } catch {
+    // Fallback: eine Zeile = ein Text-Token
+    return code.split('\n').map((line) => [{ content: line, color: '#D4D4D4' }]);
+  }
+}
+
+function renderTokenLine(tokens) {
+  return tokens
+    .map((t) => `<span style="color:${t.color}">${escapeHtml(t.content)}</span>`)
+    .join('');
+}
+
+// ---------- Diff-Pane rendern ----------
+
+function renderPane({ id, relPath, meta, rows, stats }) {
+  const statsHtml = stats
+    ? `<span class="stat-inline"><span class="stat-add">+${stats.insertions}</span>&nbsp;<span class="stat-del">−${stats.deletions}</span></span>`
+    : '';
+  return `<div class="code-pane" id="${id}" data-path="${escapeHtml(relPath)}" data-meta="${escapeHtml(meta)}"><div class="diff-view">${rows.join('')}</div><div class="pane-footer">${statsHtml}</div></div>`;
+}
+
+function buildRows(content, diffInfo, highlighter, lang, allAddedFallback) {
+  const lines = content.split('\n');
+  // Trailing newline vermeidet eine leere letzte Zeile
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+
+  const tokens = tokenizeLines(highlighter, content, lang);
+  const rows = [];
+
+  const isFullyNew = diffInfo?.isNew || allAddedFallback;
+
+  for (let i = 0; i < lines.length; i++) {
+    const newLineNum = i + 1;
+
+    // Gelöschte Zeilen, die VOR dieser Zeile im Original standen
+    if (diffInfo && diffInfo.deletionsByNewLine.has(newLineNum)) {
+      for (const delContent of diffInfo.deletionsByNewLine.get(newLineNum)) {
+        const delTokens = tokenizeLines(highlighter, delContent, lang)[0] || [{ content: delContent, color: '#D4D4D4' }];
+        rows.push(
+          `<div class="row row-del"><span class="gutter">·</span><span class="marker">-</span><span class="content">${renderTokenLine(delTokens)}</span></div>`
+        );
+      }
+    }
+
+    const lineTokens = tokens[i] || [{ content: lines[i], color: '#D4D4D4' }];
+    let type = 'ctx';
+    let marker = '&nbsp;';
+    if (isFullyNew || diffInfo?.addedLines.has(newLineNum)) {
+      type = 'add';
+      marker = '+';
+    }
+    rows.push(
+      `<div class="row row-${type}"><span class="gutter">${newLineNum}</span><span class="marker">${marker}</span><span class="content">${renderTokenLine(lineTokens)}</span></div>`
+    );
+  }
+
+  // Eventuell noch Deletions nach der letzten Zeile
+  if (diffInfo) {
+    for (const [key, dels] of diffInfo.deletionsByNewLine.entries()) {
+      if (key > lines.length) {
+        for (const delContent of dels) {
+          const delTokens = tokenizeLines(highlighter, delContent, lang)[0] || [{ content: delContent, color: '#D4D4D4' }];
+          rows.push(
+            `<div class="row row-del"><span class="gutter">·</span><span class="marker">-</span><span class="content">${renderTokenLine(delTokens)}</span></div>`
+          );
+        }
+      }
+    }
+  }
+
+  return rows;
+}
+
 // ---------- Seite rendern ----------
 
-function pageTemplate({ title, sidebarTitle, treeHtml, panesHtml, firstId, fileCount }) {
+function pageTemplate({ title, sidebarTitle, treeHtml, panesHtml, firstId, fileCount, totalIns, totalDel }) {
+  const totalsBadge =
+    totalIns != null
+      ? `<div class="totals"><span class="stat-add">+${totalIns}</span>&nbsp;<span class="stat-del">−${totalDel}</span> Zeilen</div>`
+      : '';
   return `<!doctype html>
 <html lang="de">
 <head>
@@ -153,11 +323,12 @@ function pageTemplate({ title, sidebarTitle, treeHtml, panesHtml, firstId, fileC
     <div class="sidebar-header">
       <div class="title">${escapeHtml(sidebarTitle)}</div>
       <div>${fileCount} Datei${fileCount === 1 ? '' : 'en'}</div>
+      ${totalsBadge}
     </div>
     ${treeHtml}
     <div class="footer-note">
-      Anonymisierter Code-Output einer Agentic-AI-Framework-Evaluation.<br>
-      Bachelor-Thesis, DHSH — Nicolas.
+      Grün = vom Agenten hinzugefügt. Rot = entfernt. Ohne Markierung = unverändert.<br>
+      Anonymisierter Output, Bachelor-Thesis (DHSH).
     </div>
   </aside>
   <main class="content">
@@ -205,14 +376,11 @@ async function main() {
   const { grammar, source } = await loadAlGrammar();
   console.log('  gefunden: ' + source);
 
-  console.log('> Initialisiere Shiki mit Theme dark-plus …');
+  console.log('> Initialisiere Shiki (dark-plus) …');
   const highlighter = await createHighlighter({
     themes: ['dark-plus'],
     langs: ['json', 'markdown', 'xml', 'yaml'],
   });
-  // Shiki erwartet `name` als den registrierten Bezeichner. Plist liefert oft "AL"
-  // (Großbuchstaben) – wir überschreiben auf 'al' und verzichten auf Aliase, um
-  // die Fehlermeldung "Circular alias al -> al" zu vermeiden.
   const alLang = { ...grammar, name: 'al', scopeName: 'source.al' };
   delete alLang.aliases;
   await highlighter.loadLanguage(alLang);
@@ -220,8 +388,6 @@ async function main() {
   console.log('> Räume docs/ auf …');
   await fs.rm(OUT_DIR, { recursive: true, force: true });
   await fs.mkdir(OUT_DIR, { recursive: true });
-
-  // Assets kopieren
   await fs.mkdir(path.join(OUT_DIR, 'assets'), { recursive: true });
   const cssSrc = await fs.readFile(path.join(ASSETS_SRC, 'styles.css'), 'utf8');
   await fs.writeFile(path.join(OUT_DIR, 'assets', 'styles.css'), cssSrc, 'utf8');
@@ -234,28 +400,27 @@ async function main() {
 
     for (const framework of FRAMEWORKS) {
       const outputSlug = scenarioMapping[framework];
-      if (!outputSlug) {
-        console.warn(`  [warn] kein Mapping für ${scenario.slug}/${framework}`);
-        continue;
-      }
+      if (!outputSlug) continue;
 
       const frameworkDir = path.join(scenarioDir, framework);
-      try {
-        await fs.access(frameworkDir);
-      } catch {
-        console.warn(`  [warn] Ordner fehlt: ${frameworkDir}`);
-        continue;
-      }
+      try { await fs.access(frameworkDir); } catch { continue; }
 
       const files = await collectFiles(frameworkDir);
-      if (files.length === 0) {
-        console.warn(`  [warn] keine Dateien: ${frameworkDir}`);
-        continue;
-      }
+      if (files.length === 0) continue;
+
+      // Szenario A: echten Diff laden. Szenario B: alle Files gelten als neu.
+      const diffMap =
+        scenario.slug === 'szenario-a'
+          ? await loadDiffForOutput(scenario.outputsSub, framework)
+          : new Map();
+      const treatAllAsNew = scenario.slug === 'szenario-b';
 
       const fileIdMap = new Map();
+      const fileStats = new Map();
       const panes = [];
       let firstId = null;
+      let totalIns = 0;
+      let totalDel = 0;
 
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
@@ -265,26 +430,30 @@ async function main() {
 
         const content = await fs.readFile(f.absPath, 'utf8');
         const lang = languageForFile(f.relPath);
-        let highlighted;
-        try {
-          highlighted = highlighter.codeToHtml(content, {
-            lang,
-            theme: 'dark-plus',
-          });
-        } catch (err) {
-          console.warn(`  [warn] Highlighting fallback für ${f.relPath} (${lang}): ${err.message}`);
-          highlighted = `<pre class="shiki"><code>${escapeHtml(content)}</code></pre>`;
-        }
+        const diffInfo = diffMap.get(f.relPath) || null;
 
-        const lines = content.split('\n').length;
-        const meta = `${lang.toUpperCase()} · ${lines} Zeilen`;
-        panes.push(
-          `<div class="code-pane" id="${id}" data-path="${escapeHtml(f.relPath)}" data-meta="${escapeHtml(meta)}">${highlighted}</div>`
-        );
+        let ins = 0, del = 0;
+        if (diffInfo) {
+          ins = diffInfo.insertions;
+          del = diffInfo.deletions;
+        } else if (treatAllAsNew) {
+          ins = content.split('\n').length;
+          if (content.endsWith('\n')) ins = Math.max(0, ins - 1);
+        }
+        totalIns += ins;
+        totalDel += del;
+
+        const stats = ins || del ? { insertions: ins, deletions: del } : null;
+        fileStats.set(f.relPath, stats);
+
+        const rows = buildRows(content, diffInfo, highlighter, lang, treatAllAsNew);
+        const meta = `${lang.toUpperCase()} · ${content.split('\n').length} Zeilen`;
+
+        panes.push(renderPane({ id, relPath: f.relPath, meta, rows, stats }));
       }
 
       const tree = buildTree(files);
-      const treeHtml = renderTree(tree, fileIdMap, 0);
+      const treeHtml = renderTree(tree, fileIdMap, fileStats, 0);
 
       const title = `${scenario.label} — ${outputSlug.replace('output-', 'Output ')}`;
       const pageHtml = pageTemplate({
@@ -294,6 +463,8 @@ async function main() {
         panesHtml: panes.join('\n'),
         firstId,
         fileCount: files.length,
+        totalIns,
+        totalDel,
       });
 
       const pageDir = path.join(OUT_DIR, scenario.slug, outputSlug);
@@ -305,13 +476,14 @@ async function main() {
         outputSlug,
         url: `${scenario.slug}/${outputSlug}/`,
         fileCount: files.length,
+        totalIns,
+        totalDel,
       });
 
-      console.log(`  ✓ ${scenario.slug}/${outputSlug}  (${files.length} Dateien)`);
+      console.log(`  ✓ ${scenario.slug}/${outputSlug}  (${files.length} Dateien, +${totalIns}/-${totalDel})`);
     }
   }
 
-  // Minimale index.html (intern, mit noindex)
   indexEntries.sort((a, b) => a.scenario.localeCompare(b.scenario) || a.outputSlug.localeCompare(b.outputSlug));
   const indexHtml = `<!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="robots" content="noindex,nofollow">
@@ -322,12 +494,15 @@ async function main() {
 <h1>Survey Outputs (intern, anonymisiert)</h1>
 <p>Diese Index-Seite ist nur für dich. Probanden erhalten nur die Deep-Links aus Tally.</p>
 <ul>
-${indexEntries.map((e) => `<li><strong>${escapeHtml(e.scenario)}</strong> – <a href="${e.url}">${e.outputSlug}</a> <span style="color:#999">(${e.fileCount} Dateien)</span></li>`).join('\n')}
+${indexEntries
+  .map(
+    (e) =>
+      `<li><strong>${escapeHtml(e.scenario)}</strong> – <a href="${e.url}">${e.outputSlug}</a> <span style="color:#999">(${e.fileCount} Dateien, +${e.totalIns}/-${e.totalDel})</span></li>`
+  )
+  .join('\n')}
 </ul>
 </body></html>`;
   await fs.writeFile(path.join(OUT_DIR, 'index.html'), indexHtml, 'utf8');
-
-  // robots.txt: alles auf noindex
   await fs.writeFile(path.join(OUT_DIR, 'robots.txt'), 'User-agent: *\nDisallow: /\n', 'utf8');
 
   console.log('\n> Fertig. Output in: ' + OUT_DIR);

@@ -142,38 +142,83 @@ html, body {
 .code-pane { display: none; }
 .code-pane.active { display: block; }
 
-.code-pane pre.shiki {
-  margin: 0 !important;
-  padding: 16px 0 24px 0 !important;
-  font-family: var(--font-mono) !important;
-  font-size: 13px !important;
-  line-height: 1.55 !important;
-  overflow: visible !important;
+.diff-view {
+  padding: 12px 0 24px 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.55;
 }
 
-.code-pane pre.shiki code {
-  counter-reset: line;
-  display: block;
+.row {
+  display: grid;
+  grid-template-columns: 56px 20px 1fr;
+  white-space: pre;
+  min-height: 1.55em;
 }
 
-.code-pane pre.shiki .line {
-  display: inline-block;
-  width: 100%;
-  padding: 0 16px 0 0;
-}
-
-.code-pane pre.shiki .line::before {
-  counter-increment: line;
-  content: counter(line);
-  display: inline-block;
-  width: 48px;
-  padding-right: 16px;
-  margin-right: 8px;
+.row .gutter {
   text-align: right;
+  padding-right: 12px;
   color: #858585;
   user-select: none;
   border-right: 1px solid var(--border);
 }
+
+.row .marker {
+  text-align: center;
+  color: #858585;
+  user-select: none;
+}
+
+.row .content {
+  padding-left: 10px;
+  white-space: pre;
+  overflow-x: visible;
+}
+
+.row-add { background: rgba(46,160,67,0.14); }
+.row-add .marker { color: #3fb950; font-weight: 600; }
+.row-add .gutter { color: #7ee787; }
+
+.row-del { background: rgba(248,81,73,0.14); }
+.row-del .marker { color: #f85149; font-weight: 600; }
+.row-del .gutter { color: #f85149; }
+.row-del .content { opacity: 0.88; }
+
+.row-ctx:hover { background: rgba(255,255,255,0.02); }
+
+/* Sidebar-Statistik-Badges */
+.tree .stat {
+  margin-left: auto;
+  padding-right: 10px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+.tree .stat-add,
+.stat-add { color: #3fb950; }
+.tree .stat-del,
+.stat-del { color: #f85149; }
+.tree .stat-add + .stat-del { margin-left: 4px; }
+
+.tree .fname { overflow: hidden; text-overflow: ellipsis; }
+.tree .file { justify-content: flex-start; }
+
+.totals {
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.pane-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.stat-inline { font-family: var(--font-mono); }
 
 .footer-note {
   padding: 12px 16px;
