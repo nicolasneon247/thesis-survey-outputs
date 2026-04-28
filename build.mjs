@@ -239,63 +239,75 @@ function renderTokenLine(tokens) {
 
 // ---------- Diff-Pane rendern ----------
 
-function renderPane({ id, relPath, meta, rows, stats }) {
+function renderPane({ id, relPath, meta, rows, stats, marks, totalRows }) {
   const statsHtml = stats
     ? `<span class="stat-inline"><span class="stat-add">+${stats.insertions}</span>&nbsp;<span class="stat-del">−${stats.deletions}</span></span>`
     : '';
-  return `<div class="code-pane" id="${id}" data-path="${escapeHtml(relPath)}" data-meta="${escapeHtml(meta)}"><div class="diff-view">${rows.join('')}</div><div class="pane-footer">${statsHtml}</div></div>`;
+  const marksAttr = escapeHtml(JSON.stringify(marks));
+  return `<div class="code-pane" id="${id}" data-path="${escapeHtml(relPath)}" data-meta="${escapeHtml(meta)}" data-total="${totalRows}" data-marks="${marksAttr}"><div class="diff-view">${rows.join('')}</div><div class="pane-footer">${statsHtml}</div></div>`;
 }
 
+// Liefert Rows als HTML-Strings + Marks-Liste für den Overview-Ruler
 function buildRows(content, diffInfo, highlighter, lang, allAddedFallback) {
   const lines = content.split('\n');
-  // Trailing newline vermeidet eine leere letzte Zeile
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
 
   const tokens = tokenizeLines(highlighter, content, lang);
   const rows = [];
+  const marks = [];
+  let curMark = null;
+
+  const pushRow = (type, gutter, marker, html) => {
+    const idx = rows.length;
+    rows.push(
+      `<div class="row row-${type}" data-i="${idx}"><span class="gutter">${gutter}</span><span class="marker">${marker}</span><span class="content">${html}</span></div>`
+    );
+    if (type === 'add' || type === 'del') {
+      if (curMark && curMark.k === type && curMark.e === idx - 1) {
+        curMark.e = idx;
+      } else {
+        if (curMark) marks.push(curMark);
+        curMark = { k: type, s: idx, e: idx };
+      }
+    } else {
+      if (curMark) { marks.push(curMark); curMark = null; }
+    }
+  };
 
   const isFullyNew = diffInfo?.isNew || allAddedFallback;
 
   for (let i = 0; i < lines.length; i++) {
     const newLineNum = i + 1;
 
-    // Gelöschte Zeilen, die VOR dieser Zeile im Original standen
     if (diffInfo && diffInfo.deletionsByNewLine.has(newLineNum)) {
       for (const delContent of diffInfo.deletionsByNewLine.get(newLineNum)) {
         const delTokens = tokenizeLines(highlighter, delContent, lang)[0] || [{ content: delContent, color: '#D4D4D4' }];
-        rows.push(
-          `<div class="row row-del"><span class="gutter">·</span><span class="marker">-</span><span class="content">${renderTokenLine(delTokens)}</span></div>`
-        );
+        pushRow('del', '·', '-', renderTokenLine(delTokens));
       }
     }
 
     const lineTokens = tokens[i] || [{ content: lines[i], color: '#D4D4D4' }];
-    let type = 'ctx';
-    let marker = '&nbsp;';
     if (isFullyNew || diffInfo?.addedLines.has(newLineNum)) {
-      type = 'add';
-      marker = '+';
+      pushRow('add', String(newLineNum), '+', renderTokenLine(lineTokens));
+    } else {
+      pushRow('ctx', String(newLineNum), '&nbsp;', renderTokenLine(lineTokens));
     }
-    rows.push(
-      `<div class="row row-${type}"><span class="gutter">${newLineNum}</span><span class="marker">${marker}</span><span class="content">${renderTokenLine(lineTokens)}</span></div>`
-    );
   }
 
-  // Eventuell noch Deletions nach der letzten Zeile
   if (diffInfo) {
     for (const [key, dels] of diffInfo.deletionsByNewLine.entries()) {
       if (key > lines.length) {
         for (const delContent of dels) {
           const delTokens = tokenizeLines(highlighter, delContent, lang)[0] || [{ content: delContent, color: '#D4D4D4' }];
-          rows.push(
-            `<div class="row row-del"><span class="gutter">·</span><span class="marker">-</span><span class="content">${renderTokenLine(delTokens)}</span></div>`
-          );
+          pushRow('del', '·', '-', renderTokenLine(delTokens));
         }
       }
     }
   }
 
-  return rows;
+  if (curMark) marks.push(curMark);
+
+  return { rows, marks, totalRows: rows.length };
 }
 
 // ---------- Seite rendern ----------
@@ -338,10 +350,69 @@ function pageTemplate({ title, sidebarTitle, treeHtml, panesHtml, firstId, fileC
     </div>
     ${panesHtml}
   </main>
+  <div class="overview-ruler"><div class="ruler-inner" id="ruler"><div class="ruler-thumb" id="ruler-thumb"></div></div></div>
 </div>
 <script>
 (function(){
   var firstId = ${JSON.stringify(firstId)};
+  var ruler = document.getElementById('ruler');
+  var thumb = document.getElementById('ruler-thumb');
+  var content = document.querySelector('.content');
+  var scrolling = false;
+
+  function buildRuler(pane){
+    // Marks aufbauen
+    Array.prototype.slice.call(ruler.querySelectorAll('.ruler-mark')).forEach(function(m){ m.remove(); });
+    var total = parseInt(pane.dataset.total, 10) || 1;
+    var marks = [];
+    try { marks = JSON.parse(pane.dataset.marks || '[]'); } catch(e) { marks = []; }
+    marks.forEach(function(m){
+      var topPct = (m.s / total) * 100;
+      var heightPct = Math.max(0.25, ((m.e - m.s + 1) / total) * 100);
+      var d = document.createElement('div');
+      d.className = 'ruler-mark mark-' + m.k;
+      d.style.top = topPct + '%';
+      d.style.height = heightPct + '%';
+      d.title = (m.k === 'add' ? '+' : '−') + ' ab Zeile ' + (m.s + 1);
+      d.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var row = pane.querySelector('.row[data-i="' + m.s + '"]');
+        if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+      ruler.appendChild(d);
+    });
+  }
+
+  function updateThumb(){
+    var pane = document.querySelector('.code-pane.active');
+    if (!pane) { thumb.style.display = 'none'; return; }
+    var diff = pane.querySelector('.diff-view');
+    if (!diff) { thumb.style.display = 'none'; return; }
+    thumb.style.display = 'block';
+    var paneTop = pane.offsetTop;
+    var paneHeight = diff.offsetHeight;
+    if (paneHeight <= 0) return;
+    var startFrac = Math.max(0, (content.scrollTop - paneTop) / paneHeight);
+    var endFrac = Math.min(1, (content.scrollTop - paneTop + content.clientHeight) / paneHeight);
+    if (endFrac <= 0 || startFrac >= 1) {
+      thumb.style.display = 'none'; return;
+    }
+    thumb.style.top = (startFrac * 100) + '%';
+    thumb.style.height = Math.max(2, (endFrac - startFrac) * 100) + '%';
+  }
+
+  // Klick auf leeren Bereich des Rulers = Sprung
+  ruler.addEventListener('click', function(ev){
+    if (ev.target !== ruler && !ev.target.classList.contains('ruler-thumb')) return;
+    var pane = document.querySelector('.code-pane.active');
+    if (!pane) return;
+    var rect = ruler.getBoundingClientRect();
+    var frac = (ev.clientY - rect.top) / rect.height;
+    var diff = pane.querySelector('.diff-view');
+    if (!diff) return;
+    content.scrollTop = pane.offsetTop + frac * diff.offsetHeight - content.clientHeight / 2;
+  });
+
   function activate(id){
     document.querySelectorAll('.code-pane').forEach(function(p){ p.classList.toggle('active', p.id === id); });
     document.querySelectorAll('.tree .file').forEach(function(f){ f.classList.toggle('active', f.dataset.target === id); });
@@ -349,15 +420,26 @@ function pageTemplate({ title, sidebarTitle, treeHtml, panesHtml, firstId, fileC
     if (active){
       document.getElementById('current-path').textContent = active.dataset.path || '';
       document.getElementById('current-meta').textContent = active.dataset.meta || '';
+      buildRuler(active);
     }
-    document.querySelector('.content').scrollTop = 0;
+    content.scrollTop = 0;
+    updateThumb();
   }
+
   document.querySelectorAll('.tree .file').forEach(function(f){
     f.addEventListener('click', function(){ activate(f.dataset.target); });
   });
   document.querySelectorAll('.tree .folder > .label').forEach(function(l){
     l.addEventListener('click', function(){ l.parentElement.classList.toggle('collapsed'); });
   });
+
+  content.addEventListener('scroll', function(){
+    if (scrolling) return;
+    scrolling = true;
+    requestAnimationFrame(function(){ updateThumb(); scrolling = false; });
+  });
+  window.addEventListener('resize', updateThumb);
+
   if (firstId) activate(firstId);
 })();
 </script>
@@ -446,10 +528,18 @@ async function main() {
         const stats = ins || del ? { insertions: ins, deletions: del } : null;
         fileStats.set(f.relPath, stats);
 
-        const rows = buildRows(content, diffInfo, highlighter, lang, treatAllAsNew);
+        const built = buildRows(content, diffInfo, highlighter, lang, treatAllAsNew);
         const meta = `${lang.toUpperCase()} · ${content.split('\n').length} Zeilen`;
 
-        panes.push(renderPane({ id, relPath: f.relPath, meta, rows, stats }));
+        panes.push(renderPane({
+          id,
+          relPath: f.relPath,
+          meta,
+          rows: built.rows,
+          stats,
+          marks: built.marks,
+          totalRows: built.totalRows,
+        }));
       }
 
       const tree = buildTree(files);
